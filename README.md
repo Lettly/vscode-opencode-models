@@ -112,6 +112,17 @@ npm run package
 
 Press F5 in VS Code to launch an Extension Development Host. CI checks types, runs tests, and builds the extension on each push and pull request.
 
+### Publishing
+
+Publishing requires a [Marketplace publisher](https://marketplace.visualstudio.com/manage) whose ID matches `publisher` in `package.json`, and an Azure DevOps personal access token with the **Marketplace → Manage** scope:
+
+```sh
+node_modules/.bin/vsce login Lettly   # stores the token in the OS keychain
+npm run release                       # builds and publishes the current version
+```
+
+`npm run release` runs `vsce publish`, which triggers `vscode:prepublish` to build first. Bump `version` in `package.json` before publishing a new release.
+
 The extension icon is rasterized from `resources/icon.svg` to `resources/icon.png` (256×256, transparent background) with headless Chrome:
 
 ```sh

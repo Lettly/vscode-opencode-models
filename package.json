@@ -49,6 +49,7 @@
     "check": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
     "package": "vsce package --no-dependencies",
+    "release": "vsce publish --no-dependencies",
     "verify": "npm run check && npm test && npm run build"
   },
   "dependencies": { "@opencode/client": "2.0.22" },
