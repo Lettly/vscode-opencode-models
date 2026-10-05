@@ -9,23 +9,21 @@ import {
   type ToolDescriptor,
 } from "./convert.js"
 import { streamOpenAIChat } from "./openai.js"
-import { ServiceConnection } from "./service.js"
+import type { OpenCodeClient, ServiceConnection } from "./service.js"
 import { readSettings, workspaceDirectory } from "./settings.js"
 import { ProviderRequestError, type StreamHandler } from "./stream.js"
-
-export interface OpenCodeChatModel extends vscode.LanguageModelChatInformation {
-  readonly entry: CatalogModel
-}
 
 const CATALOG_TTL_MS = 15_000
 const CHARS_PER_TOKEN = 4
 
-export class OpenCodeChatProvider implements vscode.LanguageModelChatProvider<OpenCodeChatModel> {
+export class OpenCodeChatProvider implements vscode.LanguageModelChatProvider {
   private readonly changed = new vscode.EventEmitter<void>()
+  private readonly resolved = new Map<string, CatalogModel>()
+
   readonly onDidChangeLanguageModelChatInformation: vscode.Event<void> = this.changed.event
 
-  private cache: { at: number; models: OpenCodeChatModel[] } | undefined
-  private lastWarning: string | undefined
+  private models: vscode.LanguageModelChatInformation[] | undefined
+  private loadedAt = 0
 
   constructor(
     private readonly connection: ServiceConnection,
@@ -33,216 +31,239 @@ export class OpenCodeChatProvider implements vscode.LanguageModelChatProvider<Op
   ) {}
 
   refresh(): void {
-    this.cache = undefined
+    this.models = undefined
+    this.resolved.clear()
+    this.loadedAt = 0
     this.changed.fire()
   }
 
-  async provideLanguageModelChatInformation(_options: { silent: boolean }, _token: vscode.CancellationToken): Promise<OpenCodeChatModel[]> {
-    if (this.cache && Date.now() - this.cache.at < CATALOG_TTL_MS) return this.cache.models
+  async provideLanguageModelChatInformation(
+    options: { silent: boolean },
+    token: vscode.CancellationToken,
+  ): Promise<vscode.LanguageModelChatInformation[]> {
+    if (this.models && Date.now() - this.loadedAt < CATALOG_TTL_MS) return this.models
+    if (token.isCancellationRequested) return this.models ?? []
 
-    let client: Awaited<ReturnType<ServiceConnection["ensure"]>>
-    try {
-      client = _options.silent ? await this.connection.discover() : await this.connection.ensure()
-    } catch (error) {
-      this.report(error)
-      return this.cache?.models ?? []
-    }
-    if (!client) return this.cache?.models ?? []
+    const client = options.silent
+      ? await this.connection.discover().catch(() => undefined)
+      : await this.connection.ensure().catch((error) => {
+          this.report(error, options.silent)
+          return undefined
+        })
+    if (!client) return this.models ?? []
 
     try {
       const settings = readSettings()
       const catalog = await loadCatalog(client, workspaceDirectory(), settings.modelFilter)
-      const models = catalog.models.map(toChatModel)
-      this.cache = { at: Date.now(), models }
-      this.log.info(`Loaded ${models.length} OpenCode model(s) from ${this.connection.url() ?? "unknown"}`)
-      return models
+      this.resolved.clear()
+      for (const model of catalog.models) this.resolved.set(model.id, model)
+      this.models = catalog.models.map(toLanguageModelInformation)
+      this.loadedAt = Date.now()
+      this.log.info(`Loaded ${this.models.length} OpenCode model(s) from ${this.connection.url() ?? "unknown service"}.`)
+      return this.models
     } catch (error) {
-      this.report(error)
-      return this.cache?.models ?? []
+      this.report(error, options.silent)
+      return this.models ?? []
     }
   }
 
   async provideLanguageModelChatResponse(
-    model: OpenCodeChatModel,
+    model: vscode.LanguageModelChatInformation,
     messages: readonly vscode.LanguageModelChatRequestMessage[],
     options: vscode.ProvideLanguageModelChatResponseOptions,
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken,
   ): Promise<void> {
-    const entry = model.entry
-    const descriptors = toDescriptors(messages)
+    const entry = this.resolved.get(model.id)
+    if (!entry) {
+      throw new Error(`Model "${model.id}" is no longer available. Run "OpenCode Models: Refresh Models" and try again.`)
+    }
+
+    const settings = readSettings()
+    const conversation = toDescriptors(messages)
     const tools = (options.tools ?? []).map(toToolDescriptor)
     const toolChoice: ToolChoice =
       options.toolMode === vscode.LanguageModelChatToolMode.Required && tools.length > 0 ? "required" : "auto"
 
-    const settings = readSettings()
     const controller = new AbortController()
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
       controller.abort()
     }, settings.requestTimeoutSeconds * 1000)
-    const cancellation = token.onCancellationRequested(() => controller.abort())
+    token.onCancellationRequested(() => controller.abort())
 
     const handler: StreamHandler = {
       onText: (delta) => progress.report(new vscode.LanguageModelTextPart(delta)),
-      onToolCall: (id, name, input) => progress.report(new vscode.LanguageModelToolCallPart(id, name, toObject(input))),
+      onToolCall: (id, name, input) => progress.report(new vscode.LanguageModelToolCallPart(id, name, asObject(input))),
     }
 
     try {
-      if (entry.protocol === "generate") {
-        const client = this.connection.peek()
-        if (!client) throw new Error("The OpenCode service is not connected.")
-        const result = await client.generate.text(
-          { prompt: serializeTranscript(descriptors), model: { providerID: entry.providerID, id: entry.modelID } },
-          { signal: controller.signal },
-        )
-        if (result.text.length > 0) handler.onText(result.text)
-        return
-      }
-
-      const baseURL = entry.baseURL ?? ""
       if (entry.protocol === "anthropic") {
         await streamAnthropicMessages(
           {
-            baseURL,
+            baseURL: requireBaseURL(entry),
             apiKey: entry.apiKey,
             model: entry.modelID,
             headers: entry.headers,
             body: entry.body,
-            messages: descriptors,
+            messages: conversation,
             tools,
             toolChoice,
-            maxOutputTokens: entry.output,
+            maxOutputTokens: outputLimit(entry),
           },
           handler,
           controller.signal,
         )
-      } else {
-        await streamOpenAIChat(
-          {
-            baseURL,
-            apiKey: entry.apiKey,
-            model: entry.modelID,
-            headers: entry.headers,
-            body: entry.body,
-            messages: descriptors,
-            tools,
-            toolChoice,
-            maxOutputTokens: undefined,
-          },
-          handler,
-          controller.signal,
-        )
-      }
-    } catch (error) {
-      if (controller.signal.aborted) {
-        if (timedOut) throw new Error(`The model did not respond within ${settings.requestTimeoutSeconds}s.`)
         return
       }
-      this.report(error)
-      throw error instanceof Error ? error : new Error(String(error))
+
+      if (entry.protocol === "openai") {
+        await streamOpenAIChat(
+          {
+            baseURL: requireBaseURL(entry),
+            apiKey: entry.apiKey,
+            model: entry.modelID,
+            headers: entry.headers,
+            body: entry.body,
+            messages: conversation,
+            tools,
+            toolChoice,
+          },
+          handler,
+          controller.signal,
+        )
+        return
+      }
+
+      const client = this.connection.peek()
+      if (!client) throw new Error("Not connected to the OpenCode service. Run \"OpenCode Models: Refresh Models\" and retry.")
+      const text = await generateText(client, entry, serializeTranscript(conversation), controller.signal)
+      if (text.length > 0) handler.onText(text)
+    } catch (error) {
+      if (controller.signal.aborted) {
+        if (timedOut) throw new Error(`The OpenCode request timed out after ${settings.requestTimeoutSeconds}s.`)
+        return
+      }
+      throw new Error(describeError(error))
     } finally {
       clearTimeout(timer)
-      cancellation.dispose()
     }
   }
 
-  provideTokenCount(_model: OpenCodeChatModel, text: string | vscode.LanguageModelChatRequestMessage, _token: vscode.CancellationToken): Promise<number> {
-    const value = typeof text === "string" ? text : textOfDescriptor(toDescriptors([text]))
-    return Promise.resolve(Math.max(1, Math.ceil(value.length / CHARS_PER_TOKEN)))
+  provideTokenCount(
+    _model: vscode.LanguageModelChatInformation,
+    value: string | vscode.LanguageModelChatRequestMessage,
+  ): Promise<number> {
+    const text =
+      typeof value === "string" ? value : toDescriptors([value]).flatMap((message) => message.parts.flatMap(textOf)).join("")
+    return Promise.resolve(Math.max(1, Math.ceil(text.length / CHARS_PER_TOKEN)))
   }
 
-  private report(error: unknown): void {
-    const message = describe(error)
-    this.log.warn(message)
-    if (message !== this.lastWarning) {
-      this.lastWarning = message
-      void vscode.window.showWarningMessage(`OpenCode Models: ${message}`)
-    }
+  private report(error: unknown, silent: boolean): void {
+    const message = describeError(error)
+    this.log.error(message)
+    if (!silent) void vscode.window.showErrorMessage(`OpenCode Models: ${message}`)
   }
 }
 
-function toChatModel(entry: CatalogModel): OpenCodeChatModel {
-  const features = entry.protocol === "generate" ? "text only (no tools or images)" : "streaming chat"
+function toLanguageModelInformation(model: CatalogModel): vscode.LanguageModelChatInformation {
+  const fallback = model.protocol === "generate"
   return {
-    id: entry.id,
-    name: entry.name,
-    family: entry.family,
+    id: model.id,
+    name: model.name,
+    family: model.family,
     version: "1",
-    maxInputTokens: Math.max(1, entry.context - entry.output),
-    maxOutputTokens: entry.output,
+    detail: model.providerName,
     tooltip: [
-      `OpenCode · ${entry.providerName}`,
-      `${entry.providerID}/${entry.modelID}`,
-      `Context ${entry.context.toLocaleString()} · Output ${entry.output.toLocaleString()}`,
-      features,
+      `OpenCode · ${model.providerName}`,
+      `${model.providerID}/${model.modelID}`,
+      `Context ${model.context.toLocaleString()} · Output ${model.output.toLocaleString()}`,
+      fallback ? "Text-only fallback (no tools or images)" : "Streaming chat",
     ].join("\n"),
-    detail: entry.providerName,
-    capabilities: { toolCalling: entry.tools, imageInput: entry.imageInput },
-    entry,
+    maxInputTokens: Math.max(1, model.context - model.output),
+    maxOutputTokens: Math.max(1, model.output),
+    capabilities: { toolCalling: model.tools, imageInput: model.imageInput },
   }
+}
+
+async function generateText(
+  client: OpenCodeClient,
+  model: CatalogModel,
+  prompt: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const result = await client.generate.text(
+    { prompt, model: { providerID: model.providerID, id: model.modelID } },
+    { signal },
+  )
+  return result.text
 }
 
 function toDescriptors(messages: readonly vscode.LanguageModelChatRequestMessage[]): MessageDescriptor[] {
   return messages.map((message) => ({
     role: message.role === vscode.LanguageModelChatMessageRole.Assistant ? "assistant" : "user",
-    parts: toParts(message.content),
+    parts: message.content.map(toPart).filter((part): part is PartDescriptor => part !== undefined),
   }))
 }
 
-function toParts(content: readonly unknown[]): PartDescriptor[] {
-  const parts: PartDescriptor[] = []
-  for (const part of content) {
-    if (part instanceof vscode.LanguageModelTextPart) {
-      parts.push({ kind: "text", text: part.value })
-    } else if (part instanceof vscode.LanguageModelToolCallPart) {
-      parts.push({ kind: "tool-call", id: part.callId, name: part.name, input: part.input })
-    } else if (part instanceof vscode.LanguageModelToolResultPart) {
-      parts.push({ kind: "tool-result", id: part.callId, text: flattenToolResult(part) })
-    } else if (part instanceof vscode.LanguageModelDataPart && part.mimeType.startsWith("image/")) {
-      parts.push({ kind: "image", mime: part.mimeType, base64: Buffer.from(part.data).toString("base64") })
+function toPart(part: unknown): PartDescriptor | undefined {
+  if (part instanceof vscode.LanguageModelTextPart) return { kind: "text", text: part.value }
+  if (part instanceof vscode.LanguageModelDataPart) {
+    if (part.mimeType.startsWith("image/")) {
+      return { kind: "image", mime: part.mimeType, base64: Buffer.from(part.data).toString("base64") }
     }
+    if (part.mimeType.startsWith("text/")) {
+      return { kind: "text", text: Buffer.from(part.data).toString("utf8") }
+    }
+    return undefined
   }
-  return parts
+  if (part instanceof vscode.LanguageModelToolCallPart) {
+    return { kind: "tool-call", id: part.callId, name: part.name, input: part.input }
+  }
+  if (part instanceof vscode.LanguageModelToolResultPart) {
+    return { kind: "tool-result", id: part.callId, text: resultText(part.content) }
+  }
+  return undefined
+}
+
+function resultText(content: readonly unknown[]): string {
+  const pieces: string[] = []
+  for (const item of content) {
+    if (item instanceof vscode.LanguageModelTextPart) pieces.push(item.value)
+    else if (item instanceof vscode.LanguageModelDataPart && item.mimeType.startsWith("text/")) {
+      pieces.push(Buffer.from(item.data).toString("utf8"))
+    } else if (typeof item === "string") pieces.push(item)
+  }
+  return pieces.join("\n")
 }
 
 function toToolDescriptor(tool: vscode.LanguageModelChatTool): ToolDescriptor {
   return { name: tool.name, description: tool.description, inputSchema: tool.inputSchema }
 }
 
-function flattenToolResult(part: vscode.LanguageModelToolResultPart): string {
-  return part.content
-    .map((item) => {
-      if (item instanceof vscode.LanguageModelTextPart) return item.value
-      if (item instanceof vscode.LanguageModelDataPart && item.mimeType.startsWith("text/")) {
-        return Buffer.from(item.data).toString("utf8")
-      }
-      if (typeof item === "string") return item
-      try {
-        return JSON.stringify(item)
-      } catch {
-        return ""
-      }
-    })
-    .join("\n")
+function textOf(part: PartDescriptor): string[] {
+  if (part.kind === "text") return [part.text]
+  if (part.kind === "tool-result") return [part.text]
+  return []
 }
 
-function textOfDescriptor(messages: readonly MessageDescriptor[]): string {
-  return messages
-    .flatMap((message) => message.parts)
-    .filter((part): part is Extract<PartDescriptor, { kind: "text" }> => part.kind === "text")
-    .map((part) => part.text)
-    .join("")
+function asObject(value: unknown): object {
+  return value !== null && typeof value === "object" ? (value as object) : {}
 }
 
-function toObject(input: unknown): object {
-  return typeof input === "object" && input !== null ? input : { value: input }
+function requireBaseURL(model: CatalogModel): string {
+  if (!model.baseURL) throw new Error(`No base URL is configured for provider "${model.providerID}".`)
+  return model.baseURL
 }
 
-function describe(error: unknown): string {
+function outputLimit(model: CatalogModel): number {
+  return Math.min(Math.max(1, model.output), 128_000)
+}
+
+function describeError(error: unknown): string {
   if (error instanceof ProviderRequestError) {
-    return `The provider rejected the request (HTTP ${error.status}). ${error.message}`.trim()
+    return `The provider rejected the request (HTTP ${error.status}). ${error.message.slice(0, 500)}`
   }
   if (error instanceof Error) return error.message
   return String(error)

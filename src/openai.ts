@@ -11,7 +11,7 @@ export interface OpenAIRequest {
   messages: readonly MessageDescriptor[]
   tools: readonly ToolDescriptor[]
   toolChoice: ToolChoice
-  maxOutputTokens: number | undefined
+  maxOutputTokens?: number | undefined
 }
 
 interface ToolCallAccumulator {

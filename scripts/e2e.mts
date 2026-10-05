@@ -94,29 +94,41 @@ const token = { isCancellationRequested: false, onCancellationRequested: () => (
 const models = await captured.provideLanguageModelChatInformation({ silent: false }, token)
 console.log("MODELS", models.length)
 
-const model = models.find((m: any) => m.entry.protocol === "openai" && m.capabilities.toolCalling)
-if (!model) throw new Error("no tool-capable OpenAI-protocol model available")
-console.log("SELECTED", model.id, "protocol", model.entry.protocol)
+const candidates = models.filter((m: any) => m.capabilities.toolCalling)
+if (candidates.length === 0) throw new Error("no tool-capable model available")
 
-const parts: Array<Record<string, unknown>> = []
-await captured.provideLanguageModelChatResponse(
-  model,
-  [{ role: 1, name: undefined, content: [new LanguageModelTextPart("Call the ping tool with value 5. No prose.")] }],
-  {
-    toolMode: 1,
-    tools: [{ name: "ping", description: "Ping", inputSchema: { type: "object", properties: { value: { type: "number" } } } }],
-  },
-  { report: (part: unknown) => parts.push({ type: (part as any).constructor.name, part }) },
-  token,
-)
+let succeeded = false
+for (const model of candidates) {
+  const parts: Array<Record<string, unknown>> = []
+  try {
+    await captured.provideLanguageModelChatResponse(
+      model,
+      [{ role: 1, name: undefined, content: [new LanguageModelTextPart("Call the ping tool with value 5. No prose.")] }],
+      {
+        toolMode: 1,
+        tools: [{ name: "ping", description: "Ping", inputSchema: { type: "object", properties: { value: { type: "number" } } } }],
+      },
+      { report: (part: unknown) => parts.push({ type: (part as any).constructor.name, part }) },
+      token,
+    )
+  } catch (error) {
+    console.log("SKIP", model.id, error instanceof Error ? error.message.slice(0, 80) : error)
+    continue
+  }
 
-console.log(
-  "RESULT",
-  JSON.stringify(
-    parts.map((entry) =>
-      entry.type === "LanguageModelToolCallPart"
-        ? { type: entry.type, name: (entry.part as any).name, input: (entry.part as any).input }
-        : { type: entry.type, value: (entry.part as any).value },
+  console.log(
+    "RESULT",
+    model.id,
+    JSON.stringify(
+      parts.map((entry) =>
+        entry.type === "LanguageModelToolCallPart"
+          ? { type: entry.type, name: (entry.part as any).name, input: (entry.part as any).input }
+          : { type: entry.type, value: (entry.part as any).value },
+      ),
     ),
-  ),
-)
+  )
+  succeeded = true
+  break
+}
+
+if (!succeeded) throw new Error("every tool-capable model failed")
