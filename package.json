@@ -1,0 +1,58 @@
+{
+  "name": "opencode-models",
+  "displayName": "OpenCode Models",
+  "description": "Use your OpenCode v2 models and authentication in VS Code's native AI Chat.",
+  "version": "0.1.0",
+  "publisher": "Lettly",
+  "license": "MIT",
+  "engines": { "vscode": "^1.120.0" },
+  "categories": ["AI", "Other"],
+  "keywords": ["opencode", "chat", "language-model", "ai"],
+  "repository": { "type": "git", "url": "https://github.com/Lettly/vscode-opencode-models.git" },
+  "bugs": { "url": "https://github.com/Lettly/vscode-opencode-models/issues" },
+  "homepage": "https://github.com/Lettly/vscode-opencode-models#readme",
+  "main": "./dist/extension.cjs",
+  "extensionKind": ["workspace"],
+  "activationEvents": ["onLanguageModelChatProvider:opencode-v2"],
+  "capabilities": {
+    "untrustedWorkspaces": { "supported": false, "description": "OpenCode loads workspace configuration and plugins. Trust the workspace before connecting." },
+    "virtualWorkspaces": { "supported": false }
+  },
+  "contributes": {
+    "languageModelChatProviders": [{ "vendor": "opencode-v2", "displayName": "OpenCode", "managementCommand": "opencodeModels.manage" }],
+    "commands": [
+      { "command": "opencodeModels.manage", "title": "OpenCode Models: Manage Connection" },
+      { "command": "opencodeModels.refresh", "title": "OpenCode Models: Refresh Models" }
+    ],
+    "configuration": {
+      "title": "OpenCode Models",
+      "properties": {
+        "opencodeModels.command": {
+          "type": "string", "default": "opencode", "scope": "machine",
+          "description": "OpenCode v2 executable (name on PATH or absolute path). Used to start the shared background service when necessary."
+        },
+        "opencodeModels.modelFilter": {
+          "type": "array", "items": { "type": "string" }, "default": [], "scope": "window",
+          "description": "Optional allowlist of provider/model IDs. An empty list exposes all available text models."
+        },
+        "opencodeModels.requestTimeoutSeconds": {
+          "type": "number", "default": 120, "minimum": 10, "maximum": 600, "scope": "window",
+          "description": "Maximum time to wait for a model response."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node scripts/build.mjs",
+    "check": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "package": "vsce package --no-dependencies",
+    "verify": "npm run check && npm test && npm run build"
+  },
+  "dependencies": { "@opencode/client": "2.0.22" },
+  "devDependencies": {
+    "@types/node": "^22.0.0", "@types/vscode": "^1.120.0", "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.25.0", "tsx": "^4.20.0", "typescript": "^5.9.0"
+  }
+}
