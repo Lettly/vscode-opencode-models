@@ -7,8 +7,8 @@ node_modules/**
 tsconfig.json
 .gitignore
 *.vsix
+resources/*.svg
 **/*.ts
 **/*.mts
 **/*.map
-*.vsix
 !dist/extension.cjs

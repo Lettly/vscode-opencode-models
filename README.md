@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://github.com/Lettly/vscode-opencode-models/raw/HEAD/resources/icon.png" width="128" height="128" alt="OpenCode Models icon" />
+</p>
+
 # OpenCode Models for VS Code
 
 Use models from your **OpenCode v2** configuration in VS Code's native AI Chat model picker. This is a language-model provider, not another chat panel.

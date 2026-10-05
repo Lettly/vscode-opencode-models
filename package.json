@@ -5,6 +5,7 @@
   "version": "0.1.0",
   "publisher": "Lettly",
   "license": "MIT",
+  "icon": "resources/icon.png",
   "engines": { "vscode": "^1.120.0" },
   "categories": ["AI", "Other"],
   "keywords": ["opencode", "chat", "language-model", "ai"],
