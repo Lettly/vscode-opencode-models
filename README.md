@@ -112,6 +112,16 @@ npm run package
 
 Press F5 in VS Code to launch an Extension Development Host. CI checks types, runs tests, and builds the extension on each push and pull request.
 
+The extension icon is rasterized from `resources/icon.svg` to `resources/icon.png` (256×256, transparent background) with headless Chrome:
+
+```sh
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
+  --default-background-color=00000000 --user-data-dir=/tmp/icon-profile \
+  --screenshot=resources/icon.png --window-size=256,256 \
+  "file://$PWD/resources/icon.svg"
+```
+
 ## License
 
 MIT. This is an independent project and is not affiliated with OpenCode, Microsoft, or GitHub.
